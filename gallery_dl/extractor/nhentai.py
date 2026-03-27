@@ -1,61 +1,32 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2019 Mike Fährmann
+# Copyright 2015-2025 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
-"""Extract images from https://nhentai.net/"""
+"""Extractors for https://nhentai.net/"""
 
 from .common import GalleryExtractor, Extractor, Message
 from .. import text, util
 import collections
-import json
+import random
 
 
-class NhentaiBase():
-    """Base class for nhentai extractors"""
+class NhentaiGalleryExtractor(GalleryExtractor):
+    """Extractor for image galleries from nhentai.net"""
     category = "nhentai"
     root = "https://nhentai.net"
-    media_url = "https://i.nhentai.net"
-
-
-class NhentaiGalleryExtractor(NhentaiBase, GalleryExtractor):
-    """Extractor for image galleries from nhentai.net"""
-    pattern = r"(?:https?://)?nhentai\.net(/g/(\d+))"
-    test = ("https://nhentai.net/g/147850/", {
-        "url": "5179dbf0f96af44005a0ff705a0ad64ac26547d0",
-        "keyword": {
-            "title"     : r"re:\[Morris\] Amazon no Hiyaku \| Amazon Elixir",
-            "title_en"  : str,
-            "title_ja"  : str,
-            "gallery_id": 147850,
-            "media_id"  : 867789,
-            "count"     : 16,
-            "date"      : 1446050915,
-            "scanlator" : "",
-            "artist"    : ["morris"],
-            "group"     : list,
-            "parody"    : list,
-            "characters": list,
-            "tags"      : list,
-            "type"      : "manga",
-            "lang"      : "en",
-            "language"  : "English",
-            "width"     : int,
-            "height"    : int,
-        },
-    })
+    pattern = r"(?:https?://)?nhentai\.net/g/(\d+)"
+    example = "https://nhentai.net/g/12345/"
 
     def __init__(self, match):
-        GalleryExtractor.__init__(self, match)
-        self.gallery_id = match.group(2)
-        self.data = None
+        url = self.root + "/api/gallery/" + match[1]
+        GalleryExtractor.__init__(self, match, url)
 
     def metadata(self, page):
-        self.data = data = json.loads(text.parse_unicode_escapes(text.extract(
-            page, 'JSON.parse("', '");')[0]))
+        self.data = data = util.json_loads(page)
 
         title_en = data["title"].get("english", "")
         title_ja = data["title"].get("japanese", "")
@@ -89,42 +60,40 @@ class NhentaiGalleryExtractor(NhentaiBase, GalleryExtractor):
         }
 
     def images(self, _):
-        ufmt = "{}/galleries/{}/{{}}.{{}}".format(
-            self.media_url, self.data["media_id"])
-        extdict = {"j": "jpg", "p": "png", "g": "gif"}
+        exts = {"j": "jpg", "p": "png", "g": "gif", "w": "webp", "a": "avif"}
+
+        data = self.data
+        ufmt = ("https://i{}.nhentai.net/galleries/" +
+                data["media_id"] + "/{}.{}").format
 
         return [
-            (ufmt.format(num, extdict.get(img["t"], "jpg")), {
-                "width": img["w"], "height": img["h"],
+            (ufmt(random.randint(1, 4), num, exts.get(img["t"], "jpg")), {
+                "width" : img["w"],
+                "height": img["h"],
             })
-            for num, img in enumerate(self.data["images"]["pages"], 1)
+            for num, img in enumerate(data["images"]["pages"], 1)
         ]
 
 
-class NhentaiSearchExtractor(NhentaiBase, Extractor):
-    """Extractor for nhentai search results"""
+class NhentaiExtractor(Extractor):
+    """Base class for nhentai extractors"""
     category = "nhentai"
-    subcategory = "search"
-    pattern = r"(?:https?://)?nhentai\.net/search/?\?([^#]+)"
-    test = ("https://nhentai.net/search/?q=touhou", {
-        "pattern": NhentaiGalleryExtractor.pattern,
-        "count": 30,
-        "range": "1-30",
-    })
+    root = "https://nhentai.net"
 
     def __init__(self, match):
         Extractor.__init__(self, match)
-        self.params = text.parse_query(match.group(1))
+        self.path, self.query = match.groups()
 
     def items(self):
-        yield Message.Version, 1
         data = {"_extractor": NhentaiGalleryExtractor}
-        for gallery_id in self._pagination(self.params):
-            url = "{}/g/{}/".format(self.root, gallery_id)
+        for gallery_id in self._pagination():
+            url = f"{self.root}/g/{gallery_id}/"
+            data["gallery_id"] = text.parse_int(gallery_id)
             yield Message.Queue, url, data
 
-    def _pagination(self, params):
-        url = "{}/search/".format(self.root)
+    def _pagination(self):
+        url = self.root + self.path
+        params = text.parse_query(self.query)
         params["page"] = text.parse_int(params.get("page"), 1)
 
         while True:
@@ -133,3 +102,26 @@ class NhentaiSearchExtractor(NhentaiBase, Extractor):
             if 'class="next"' not in page:
                 return
             params["page"] += 1
+
+
+class NhentaiTagExtractor(NhentaiExtractor):
+    """Extractor for nhentai tag searches"""
+    subcategory = "tag"
+    pattern = (r"(?:https?://)?nhentai\.net("
+               r"/(?:artist|category|character|group|language|parody|tag)"
+               r"/[^/?#]+(?:/popular[^/?#]*)?/?)(?:\?([^#]+))?")
+    example = "https://nhentai.net/tag/TAG/"
+
+
+class NhentaiSearchExtractor(NhentaiExtractor):
+    """Extractor for nhentai search results"""
+    subcategory = "search"
+    pattern = r"(?:https?://)?nhentai\.net(/search/?)\?([^#]+)"
+    example = "https://nhentai.net/search/?q=QUERY"
+
+
+class NhentaiFavoriteExtractor(NhentaiExtractor):
+    """Extractor for nhentai favorites"""
+    subcategory = "favorite"
+    pattern = r"(?:https?://)?nhentai\.net(/favorites/?)(?:\?([^#]+))?"
+    example = "https://nhentai.net/favorites/"
